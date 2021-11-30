@@ -1,0 +1,13 @@
+#!/bin/bash
+
+#BSUB -n 1                                                  #each job run on 1 core
+#BSUB -W 0:40                                               #job run how long? [hours:minutes]
+#BSUB -q short                                                #submit to queue
+#BSUB -M 1000                     #allocate RAM in MB
+#BSUB -R rusage[mem=1000]         #specify RAM in MB
+
+SCRIPT_DIR=$1
+echo ${SCRIPT_DIR}
+
+rm ${SCRIPT_DIR}/NORMAL_SAMPLES.tmp ${SCRIPT_DIR}/TUMOR_ONLY_LINK.csv \
+${SCRIPT_DIR}/TUMOR_PATIENTS.tmp ${SCRIPT_DIR}/PATIENT_LIST.tmp ${SCRIPT_DIR}/ALL_SAMPLES.tmp

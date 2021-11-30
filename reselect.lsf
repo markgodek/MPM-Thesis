@@ -1,0 +1,448 @@
+#!/bin/bash
+
+#BSUB -M 16000                     #allocate RAM in MB
+#BSUB -R rusage[mem=16000]         #specify RAM in MB
+
+REF=$1
+AIMS_DIR=$2
+AIMS_OUT=$3
+TUMOR_PATIENTS=$4
+COMMON_SNPS=$5
+DBSNP=$6
+VCF_DIR=$7
+TYPE=$8
+AF_DIR=$9
+NORM_GERMLINE_RESOURCE=${10}
+SCRIPT_DIR=${11}
+NO_DECOY_INTERVALS=${12}
+
+SCRIPT_OUT=${VCF_DIR}
+
+if [[ ${TYPE} == "Somatic" ]]; then
+
+PATIENT=`head -n ${LSB_JOBINDEX} ${TUMOR_PATIENTS} | tail -n 1`
+TUMOR=$(bcftools query -l ${VCF_DIR}/${PATIENT}/${PATIENT}.annotated.somatic.vcf.gz | head -n 1)
+
+mkdir -p ${AIMS_OUT}/${PATIENT}
+mkdir -p ${AF_DIR}/${PATIENT}/
+
+echo "PATIENT: ${PATIENT}"
+echo "TUMOR: ${TUMOR}"
+echo "SCRIPT_OUT: ${SCRIPT_OUT}"
+echo "AIMS_OUT: ${AIMS_OUT}"
+echo "AF_DIR: ${AF_DIR}"
+
+tabix -f ${VCF_DIR}/${PATIENT}/${PATIENT}.annotated.somatic.vcf.gz
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${VCF_DIR}/${PATIENT}/${PATIENT}.annotated.somatic.vcf.gz \
+-L ${NO_DECOY_INTERVALS} \
+--select-type-to-exclude NO_VARIATION \
+-O ${VCF_DIR}/${PATIENT}/${PATIENT}.no-decoy.annotated.somatic.vcf.gz
+
+bcftools norm -f ${REF} \
+-m -both \
+-O z \
+-o ${VCF_DIR}/${PATIENT}/norm.${PATIENT}.annotated.somatic.vcf.gz \
+${VCF_DIR}/${PATIENT}/${PATIENT}.no-decoy.annotated.somatic.vcf.gz && \
+tabix ${VCF_DIR}/${PATIENT}/norm.${PATIENT}.annotated.somatic.vcf.gz
+
+bcftools annotate \
+-a ${NORM_GERMLINE_RESOURCE} \
+-O z \
+-o ${SCRIPT_OUT}/${PATIENT}/${PATIENT}.somatic.AF.annotated.vcf.gz \
+--collapse none \
+-h ${SCRIPT_DIR}/gnomad-AF.annotations.hdr \
+-c CHROM,POS,ID,INFO/GNOMAD_AF:=INFO/AF \
+${VCF_DIR}/${PATIENT}/norm.${PATIENT}.annotated.somatic.vcf.gz
+
+FINAL_VCF=${SCRIPT_OUT}/${PATIENT}/${PATIENT}.novel.somatic.AF.annotated.vcf
+
+intersectBed -v -header \
+-a ${SCRIPT_OUT}/${PATIENT}/${PATIENT}.somatic.AF.annotated.vcf.gz \
+-b ${COMMON_SNPS} > ${FINAL_VCF} && \
+gatk IndexFeatureFile -I ${FINAL_VCF}
+
+vcf-subset -c ${TUMOR} \
+${FINAL_VCF} > ${SCRIPT_OUT}/${PATIENT}/${PATIENT}.TumorOnly.vcf
+
+gatk IndexFeatureFile -I ${SCRIPT_OUT}/${PATIENT}/${PATIENT}.TumorOnly.vcf
+
+bcftools norm \
+-f ${REF} \
+-O z \
+-d none \
+${SCRIPT_OUT}/${PATIENT}/${PATIENT}.TumorOnly.vcf | \
+bcftools query -H -f '%CHROM\t%POS\t%REF\t%ALT[\t%AF]\t%GNOMAD_AF\t%DP[\t%GT\t%AD]\n' \
+- | \
+tail -c +3 - > ${AF_DIR}/${PATIENT}/${PATIENT}.TumorAFonly.frq
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${SCRIPT_OUT}/${PATIENT}/${PATIENT}.TumorOnly.vcf \
+--select-type-to-exclude NO_VARIATION \
+--exclude-filtered true \
+-O ${AF_DIR}/${PATIENT}/${PATIENT}.TumorOnly.PASS.vcf && \
+bcftools norm \
+-f ${REF} \
+-O z \
+-d none \
+${AF_DIR}/${PATIENT}/${PATIENT}.TumorOnly.PASS.vcf | \
+bcftools query -H -f '%CHROM\t%POS\t%REF\t%ALT[\t%AF]\t%GNOMAD_AF\t%DP[\t%GT\t%AD]\n' \
+- | \
+tail -c +3 - > ${AF_DIR}/${PATIENT}/${PATIENT}.TumorAFonly.PASS.frq && \
+rm ${SCRIPT_OUT}/${PATIENT}/${PATIENT}.TumorOnly* ${AF_DIR}/${PATIENT}/${PATIENT}.TumorOnly.PASS* 
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${FINAL_VCF} \
+-L ${NO_DECOY_INTERVALS} \
+--select-type-to-exclude NO_VARIATION \
+--exclude-filtered true \
+-O ${SCRIPT_OUT}/${PATIENT}/${PATIENT}.PASS.vcf 
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${SCRIPT_OUT}/${PATIENT}/${PATIENT}.PASS.vcf \
+--select-type-to-exclude NO_VARIATION \
+-L ${AIMS_DIR}/Aim1.intervals \
+--exclude-filtered true \
+-O ${AIMS_OUT}/${PATIENT}/${PATIENT}.Aim1.PASS.vcf
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${SCRIPT_OUT}/${PATIENT}/${PATIENT}.PASS.vcf \
+--select-type-to-exclude NO_VARIATION \
+-L ${AIMS_DIR}/Aim2.intervals \
+--exclude-filtered true \
+-O ${AIMS_OUT}/${PATIENT}/${PATIENT}.Aim2.PASS.vcf
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${SCRIPT_OUT}/${PATIENT}/${PATIENT}.PASS.vcf \
+--select-type-to-exclude NO_VARIATION \
+-L ${AIMS_DIR}/PanouGenes.intervals \
+--exclude-filtered true \
+-O ${AIMS_OUT}/${PATIENT}/${PATIENT}.PanouGenes.PASS.vcf
+
+#--restrict-alleles-to BIALLELIC \
+
+fi
+ 
+if [[ ${TYPE} == "Germline" ]]; then
+
+mkdir -p ${AIMS_OUT}/germline
+mkdir -p ${AF_DIR}/germline
+
+tabix -f ${VCF_DIR}/germline.annotated.vcf.gz
+
+#for SNPs only
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${VCF_DIR}/germline.annotated.vcf.gz \
+-L ${NO_DECOY_INTERVALS} \
+--select-type-to-include SNP \
+-O ${VCF_DIR}/germline.no-decoy.annotated.vcf.gz
+
+bcftools norm -f ${REF} \
+-m -both \
+-O z \
+-o ${VCF_DIR}/norm.germline.annotated.vcf.gz \
+${VCF_DIR}/germline.no-decoy.annotated.vcf.gz && \
+tabix -f ${VCF_DIR}/norm.germline.annotated.vcf.gz
+
+bcftools annotate \
+-a ${NORM_GERMLINE_RESOURCE} \
+-O z \
+-o ${SCRIPT_OUT}/norm.germline.AF.annotated.vcf.gz \
+--collapse none \
+-h ${SCRIPT_DIR}/gnomad-AF.annotations.hdr \
+-c CHROM,POS,ID,INFO/GNOMAD_AF:=INFO/AF \
+${VCF_DIR}/norm.germline.annotated.vcf.gz 
+
+bcftools norm \
+-f ${REF} \
+-O z \
+-d none \
+${SCRIPT_OUT}/norm.germline.AF.annotated.vcf.gz | \
+bcftools query \
+-H \
+-f '%CHROM\t%POS\t%REF\t%ALT\t%AF\t%GNOMAD_AF\t%DP\t%AC\t%AN[\t%GT\t%AD]\n' \
+- | \
+tail -c +3 - > ${AF_DIR}/germline/all.AFonly.germline.frq
+
+FINAL_VCF=${SCRIPT_OUT}/novel.germline.AF.annotated.vcf
+
+intersectBed -v -header \
+-a ${SCRIPT_OUT}/norm.germline.AF.annotated.vcf.gz \
+-b ${COMMON_SNPS} > ${FINAL_VCF}
+
+bcftools norm \
+-f ${REF} \
+-O z \
+-d none \
+${FINAL_VCF} | \
+bcftools query \
+-H \
+-f '%CHROM\t%POS\t%REF\t%ALT\t%AF\t%GNOMAD_AF\t%DP\t%AC\t%AN[\t%GT\t%AD]\n' \
+- | \
+tail -c +3 - > ${AF_DIR}/germline/novel.AFonly.germline.frq
+
+gatk IndexFeatureFile -I ${FINAL_VCF}
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${FINAL_VCF} \
+--select-type-to-include SNP \
+--exclude-filtered true \
+-O ${SCRIPT_OUT}/germline.PASS.vcf && \
+bcftools norm \
+-f ${REF} \
+-O z \
+-d none \
+${SCRIPT_OUT}/germline.PASS.vcf | \
+bcftools query \
+-H \
+-f '%CHROM\t%POS\t%REF\t%ALT\t%AF\t%GNOMAD_AF\t%INFO/FUNCOTATION\t%DP\t%AC\t%AN[\t%GT\t%AD]\n' \
+-o ${AF_DIR}/germline/temp.frq \
+- && \
+python user_dir/example_familial/scripts/small_pipeline/frq_parser.py ${AF_DIR}/germline/temp.frq ${AF_DIR}/germline/germline.PASS.AFonly.frq 
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${SCRIPT_OUT}/germline.PASS.vcf \
+--select-type-to-include SNP \
+-L ${AIMS_DIR}/Aim1.intervals \
+--exclude-filtered true \
+-O ${AIMS_OUT}/germline/germline.Aim1.PASS.vcf && \
+bcftools norm \
+-f ${REF} \
+-O z \
+-d none \
+${AIMS_OUT}/germline/germline.Aim1.PASS.vcf | \
+bcftools query \
+-H \
+-f '%CHROM\t%POS\t%REF\t%ALT\t%AF\t%GNOMAD_AF\t%INFO/FUNCOTATION\t%DP\t%AC\t%AN[\t%GT\t%AD]\n' \
+-o ${AF_DIR}/germline/temp.frq \
+- && \
+python user_dir/example_familial/scripts/small_pipeline/frq_parser.py ${AF_DIR}/germline/temp.frq ${AF_DIR}/germline/germline.Aim1.PASS.AFonly.frq
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${SCRIPT_OUT}/germline.PASS.vcf \
+--select-type-to-include SNP \
+-L ${AIMS_DIR}/Aim2.intervals \
+--exclude-filtered true \
+-O ${AIMS_OUT}/germline/germline.Aim2.PASS.vcf && \
+bcftools norm \
+-f ${REF} \
+-O z \
+-d none \
+${AIMS_OUT}/germline/germline.Aim2.PASS.vcf | \
+bcftools query \
+-H \
+-f '%CHROM\t%POS\t%REF\t%ALT\t%AF\t%GNOMAD_AF\t%INFO/FUNCOTATION\t%DP\t%AC\t%AN[\t%GT\t%AD]\n' \
+-o ${AF_DIR}/germline/temp.frq \
+- && \
+python user_dir/example_familial/scripts/small_pipeline/frq_parser.py ${AF_DIR}/germline/temp.frq ${AF_DIR}/germline/germline.Aim2.PASS.AFonly.frq
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${SCRIPT_OUT}/germline.PASS.vcf \
+--select-type-to-include SNP \
+-L ${AIMS_DIR}/PanouGenes.intervals \
+--exclude-filtered true \
+-O ${AIMS_OUT}/germline/germline.PanouGenes.PASS.vcf && \
+bcftools norm \
+-f ${REF} \
+-O z \
+-d none \
+${AIMS_OUT}/germline/germline.PanouGenes.PASS.vcf | \
+bcftools query \
+-H \
+-f '%CHROM\t%POS\t%REF\t%ALT\t%AF\t%GNOMAD_AF\t%INFO/FUNCOTATION\t%DP\t%AC\t%AN[\t%GT\t%AD]\n' \
+-o ${AF_DIR}/germline/temp.frq \
+- && \
+python user_dir/example_familial/scripts/small_pipeline/frq_parser.py ${AF_DIR}/germline/temp.frq ${AF_DIR}/germline/germline.PanouGenes.PASS.AFonly.frq && \
+rm ${AF_DIR}/germline/temp.frq
+
+#all but SNPs
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${VCF_DIR}/germline.annotated.vcf.gz \
+-L ${NO_DECOY_INTERVALS} \
+--select-type-to-exclude SNP \
+--select-type-to-exclude NO_VARIATION \
+-O ${VCF_DIR}/germline.no-decoy.no-SNP.annotated.vcf.gz
+
+bcftools norm -f ${REF} \
+-m -both \
+-O z \
+-o ${VCF_DIR}/norm.germline.no-SNP.annotated.vcf.gz \
+${VCF_DIR}/germline.no-decoy.no-SNP.annotated.vcf.gz && \
+tabix -f ${VCF_DIR}/norm.germline.no-SNP.annotated.vcf.gz
+
+bcftools annotate \
+-a ${NORM_GERMLINE_RESOURCE} \
+-O z \
+-o ${SCRIPT_OUT}/norm.germline.AF.no-SNP.annotated.vcf.gz \
+--collapse none \
+-h ${SCRIPT_DIR}/gnomad-AF.annotations.hdr \
+-c CHROM,POS,ID,INFO/GNOMAD_AF:=INFO/AF \
+${VCF_DIR}/norm.germline.no-SNP.annotated.vcf.gz
+
+#add funcotation to all.AFonly.no-SNP.germline.frq all.AFonly.germline.frq etc. if we want to parse them with frq parser
+
+bcftools norm \
+-f ${REF} \
+-O z \
+-d none \
+${SCRIPT_OUT}/norm.germline.AF.no-SNP.annotated.vcf.gz | \
+bcftools query \
+-H \
+-f '%CHROM\t%POS\t%REF\t%ALT\t%AF\t%GNOMAD_AF\t%DP\t%AC\t%AN[\t%GT\t%AD]\n' \
+- | \
+tail -c +3 - > ${AF_DIR}/germline/all.AFonly.no-SNP.germline.frq
+
+FINAL_VCF=${SCRIPT_OUT}/novel.germline.AF.no-SNP.annotated.vcf
+
+intersectBed -v -header \
+-a ${SCRIPT_OUT}/norm.germline.AF.no-SNP.annotated.vcf.gz \
+-b ${COMMON_SNPS} > ${FINAL_VCF}
+
+bcftools norm \
+-f ${REF} \
+-O z \
+-d none \
+${FINAL_VCF} | \
+bcftools query \
+-H \
+-f '%CHROM\t%POS\t%REF\t%ALT\t%AF\t%GNOMAD_AF\t%DP\t%AC\t%AN[\t%GT\t%AD]\n' \
+- | \
+tail -c +3 - > ${AF_DIR}/germline/novel.AFonly.no-SNP.germline.frq
+
+gatk IndexFeatureFile -I ${FINAL_VCF}
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${FINAL_VCF} \
+--select-type-to-exclude SNP \
+--select-type-to-exclude NO_VARIATION \
+--exclude-filtered true \
+-O ${SCRIPT_OUT}/germline.no-SNP.PASS.vcf && \
+bcftools norm \
+-f ${REF} \
+-O z \
+-d none \
+${SCRIPT_OUT}/germline.no-SNP.PASS.vcf | \
+bcftools query \
+-H \
+-f '%CHROM\t%POS\t%REF\t%ALT\t%AF\t%GNOMAD_AF\t%INFO/FUNCOTATION\t%DP\t%AC\t%AN[\t%GT\t%AD]\n' \
+-o ${AF_DIR}/germline/temp.no-SNP.frq \
+- && \
+python user_dir/example_familial/scripts/small_pipeline/frq_parser.py ${AF_DIR}/germline/temp.no-SNP.frq ${AF_DIR}/germline/germline.no-SNP.PASS.AFonly.frq
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${SCRIPT_OUT}/germline.no-SNP.PASS.vcf \
+--select-type-to-exclude SNP \
+--select-type-to-exclude NO_VARIATION \
+-L ${AIMS_DIR}/Aim1.intervals \
+--exclude-filtered true \
+-O ${AIMS_OUT}/germline/germline.Aim1.no-SNP.PASS.vcf && \
+bcftools norm \
+-f ${REF} \
+-O z \
+-d none \
+${AIMS_OUT}/germline/germline.Aim1.no-SNP.PASS.vcf | \
+bcftools query \
+-H \
+-f '%CHROM\t%POS\t%REF\t%ALT\t%AF\t%GNOMAD_AF\t%INFO/FUNCOTATION\t%DP\t%AC\t%AN[\t%GT\t%AD]\n' \
+-o ${AF_DIR}/germline/temp.no-SNP.frq \
+- && \
+python user_dir/example_familial/scripts/small_pipeline/frq_parser.py ${AF_DIR}/germline/temp.no-SNP.frq ${AF_DIR}/germline/germline.Aim1.no-SNP.PASS.AFonly.frq
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${SCRIPT_OUT}/germline.no-SNP.PASS.vcf \
+--select-type-to-exclude SNP \
+--select-type-to-exclude NO_VARIATION \
+-L ${AIMS_DIR}/Aim2.intervals \
+--exclude-filtered true \
+-O ${AIMS_OUT}/germline/germline.Aim2.no-SNP.PASS.vcf && \
+bcftools norm \
+-f ${REF} \
+-O z \
+-d none \
+${AIMS_OUT}/germline/germline.Aim2.no-SNP.PASS.vcf | \
+bcftools query \
+-H \
+-f '%CHROM\t%POS\t%REF\t%ALT\t%AF\t%GNOMAD_AF\t%INFO/FUNCOTATION\t%DP\t%AC\t%AN[\t%GT\t%AD]\n' \
+-o ${AF_DIR}/germline/temp.no-SNP.frq \
+- && \
+python user_dir/example_familial/scripts/small_pipeline/frq_parser.py ${AF_DIR}/germline/temp.no-SNP.frq ${AF_DIR}/germline/germline.Aim2.no-SNP.PASS.AFonly.frq
+
+gatk SelectVariants \
+-R ${REF} \
+-V ${SCRIPT_OUT}/germline.no-SNP.PASS.vcf \
+--select-type-to-exclude SNP \
+--select-type-to-exclude NO_VARIATION \
+-L ${AIMS_DIR}/PanouGenes.intervals \
+--exclude-filtered true \
+-O ${AIMS_OUT}/germline/germline.PanouGenes.no-SNP.PASS.vcf && \
+bcftools norm \
+-f ${REF} \
+-O z \
+-d none \
+${AIMS_OUT}/germline/germline.PanouGenes.no-SNP.PASS.vcf | \
+bcftools query \
+-H \
+-f '%CHROM\t%POS\t%REF\t%ALT\t%AF\t%GNOMAD_AF\t%INFO/FUNCOTATION\t%DP\t%AC\t%AN[\t%GT\t%AD]\n' \
+-o ${AF_DIR}/germline/temp.no-SNP.frq \
+- && \
+python user_dir/example_familial/scripts/small_pipeline/frq_parser.py ${AF_DIR}/germline/temp.no-SNP.frq ${AF_DIR}/germline/germline.PanouGenes.no-SNP.PASS.AFonly.frq && \
+rm ${AF_DIR}/germline/temp.no-SNP.frq
+
+fi
+
+#if tail -c +3 temp.vcf fails, use find . -type f -name "*.vcf" -exec sed -i '1 s/.\{2\}//' {} \;
+# to remove first char and space from AF vcfs so header will properly process in R
+
+#AD is an array of integers, getAD().1 gets AD for minor allele
+
+#gatk SelectVariants \
+#-R ${REF} \
+#-V lab_path/small_pipeline/Aims/GNT920/GNT920.novel.somatic.annotated.vcf \
+#-select 'vc.getGenotype("HITS622867").getAD().0 >= 2' \
+#-O lab_path/small_pipeline/Aims/GNT920/test/GNT920.filtered.vcf
+
+# seemed to work - search Biostars if this is the best way to filter for allele depth, then find a way to programmatically get the tumor sample ID
+
+#gatk VariantFiltration \
+#-R ${REF} \
+#-V lab_path/small_pipeline/Aims/GNT920/GNT920.novel.somatic.annotated.vcf \
+#-O lab_path/small_pipeline/Aims/GNT920/test/GNT920.VariantFiltration.vcf \
+#--filter-name "Low_Allele_Depth" \
+#--filter-expression 'vc.getGenotype("HITS622867").getAD().1 >= 2' \
+#--filter-name "Low_Read_Depth" \
+#--filter-expression "DP >= 30" \
+#--invalidate-previous-filters true \
+#--invert-filter-expression true
+
+#gatk SelectVariants \
+#-R ${REF} \
+#-V lab_path/small_pipeline/Aims/GNT920/test/GNT920.VariantFiltration.vcf \
+#-O lab_path/small_pipeline/Aims/GNT920/test/GNT920.VariantFiltration.Selected.vcf \
+#--exclude-filtered true
+
+#this one-liner does the job of both of the commands above
+
+#gatk SelectVariants \
+#-R ${REF} \
+#-V lab_path/small_pipeline/Aims/GNT920/GNT920.novel.somatic.annotated.vcf \
+#-select 'vc.getGenotype("HITS622867").getAD().1 >= 2 && DP >= 30' \
+#--exclude-filtered true \
+#-O lab_path/small_pipeline/Aims/GNT920/test/GNT920.oneshot.vcf

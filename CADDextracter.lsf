@@ -1,0 +1,30 @@
+#!/bin/bash
+
+#BSUB -M 497000                     #allocate RAM in MB
+#BSUB -R rusage[mem=497000]         #specify RAM in MB
+
+TUMOR_PATIENTS=$1
+
+PATIENT=`head -n ${LSB_JOBINDEX} ${TUMOR_PATIENTS} | tail -n 1`
+
+HEADER=CADD_path/VCFheader.vcf.gz
+CADD=CADD_path/whole_genome_SNVs_inclAnno.tsv.gz
+CADD=CADD_path/somatic.filtered_whole_genome_SNVs_inclAnno.tsv.gz
+
+# germline variants
+#VCF=lab_path/variant_calling_pipeline/germline/germline.PASS.vcf
+#OUT=CADD_path/bedtools_not_sorted_whole_genome_SNVs_inclAnno.tsv
+
+# somatic variants
+VCF=lab_path/variant_calling_pipeline/somatic/${PATIENT}/${PATIENT}.PASS.vcf
+OUT=CADD_path/somatic/${PATIENT}.CADD.vcf
+
+echo TUMOR_PATIENTS: ${TUMOR_PATIENTS}
+echo PATIENT: ${PATIENT}
+echo VCF: ${VCF}
+echo OUT: ${OUT}
+
+
+module load bedtools
+
+zcat ${HEADER} ${CADD} | bedtools intersect -wa -header -sorted -a stdin -b ${VCF} > ${OUT}

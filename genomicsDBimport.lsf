@@ -1,0 +1,46 @@
+#!/bin/bash
+
+#BSUB -n 6                         #each job run on 1 core
+#BSUB -W 336:00                      #job run how long? [hours:minutes]
+#BSUB -q big                       #submit to queue
+#BSUB -M 32000                     #allocate RAM in MB
+#BSUB -R rusage[mem=32000]         #specify RAM in MB
+
+PON=$1
+SAMPLES=$2
+ponDB=$3
+REF=$4
+INTERVALS=$5
+GVCF=$6
+
+echo "PON: ${PON}"
+echo "SAMPLES: ${SAMPLES}"
+echo "ponDB: ${ponDB}"
+echo "GVCF: ${GVCF}"
+
+# dynamically construct the CLI for GenomicsDBImport based on number of samples using a string builder
+command="gatk GenomicsDBImport -R ${REF} -L ${INTERVALS} --genomicsdb-workspace-path ${ponDB} " 
+
+while read sample
+do
+	if [[ "${GVCF}" == "True" ]]
+        then
+		echo "appending GVCF"
+                arg="-V ${PON}/${sample}.normal.g.vcf.gz "
+        else
+		echo "appending normal VCF"
+                arg="-V ${PON}/${sample}.normal.vcf.gz "
+        fi
+	command+=$arg
+done < ${SAMPLES}
+
+echo "Command to run: ${command}"
+eval $command				#run the constructed string
+
+if [[ "${GVCF}" != "True" ]]
+then
+	gatk CreateSomaticPanelOfNormals \
+	-R ${REF} \
+	-V gendb://${ponDB} \
+	-O ${PON}/somatic.panel.normals.vcf.gz
+fi

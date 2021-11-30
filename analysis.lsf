@@ -1,0 +1,189 @@
+#!/bin/bash
+
+#BSUB -n 1                         #each job run on 1 core
+#BSUB -W 336:00                      #job run how long? [hours:minutes]
+#BSUB -q big                       #submit to queue
+#BSUB -M 16000                     #allocate RAM in MB
+#BSUB -R rusage[mem=16000]         #specify RAM in MB
+
+# note: this script uses the sam_patient_link file to determine how many times to run.
+# if using a dataset with many patients with only normal samples, the code could be restructured
+# to save queue time on the HPC
+
+SAM_PATIENT_LINK=$1
+PROC_DIR=$2
+ROOT=$3
+REF=$4
+INTERVALS=$5
+ponDB=$6
+GERMLINE_RESOURCE=$7
+PON_VCFs=$8
+GERMLINE_RESOURCE_BIALLELIC_COMMON_SNPS=$9
+ANNOTATIONS=${10}
+RENAME_CHRs=${11}
+AIMS_DIR=${12}
+AIMS_OUT=${13}
+DBSNP=${14}
+
+# add to selectvariants to narrow results
+#-select "AC >= 2 && DP >= 30 && AF <= 0.01" \
+#allele count greater or equal to 2
+#allele depth greater or equal to 30
+#allele frequency less than or equal to 1%
+
+SAMPLE_COUNT=$(($(wc -l < ${SAM_PATIENT_LINK}) - 1))
+
+echo "input: ${SAM_PATIENT_LINK}"
+echo "sample count is ${SAMPLE_COUNT}"
+
+OIFS=$IFS;
+IFS=",";
+
+row=(`head -n $((${LSB_JOBINDEX} +1)) ${SAM_PATIENT_LINK} | tail -n 1`)
+
+echo "job index: ${LSB_JOBINDEX}"
+echo "row: ${row[@]}"
+
+IFS=$OIFS;
+
+PATIENT="$(echo -e "${row[0]}" | tr -d '[:space:]')"
+tumor_sam="$(echo -e "${row[1]}" | tr -d '[:space:]')"
+normal_sam="$(echo -e "${row[2]}" | tr -d '[:space:]')"
+
+echo "PATIENT is ${PATIENT}"
+echo "tumor_sam is ${tumor_sam}"
+echo "normal_sam is ${normal_sam}"
+
+TUMOR_PATH=${PROC_DIR}/${tumor_sam}
+NORMAL_PATH=${PROC_DIR}/${normal_sam}
+
+SCRIPT_OUT=${ROOT}/${PATIENT}
+
+mkdir -p ${SCRIPT_OUT}
+
+tumor_bam=${TUMOR_PATH}/${tumor_sam}.post.bam
+normal_bam=${NORMAL_PATH}/${normal_sam}.post.bam
+
+echo "tumor_bam is ${tumor_bam}"
+echo "normal_bam is ${normal_bam}"
+
+echo "normal_sam char count is ${#normal_sam}"
+
+#if [[ "${normal_sam}" == "" ]]
+if test -z "${normal_sam}"
+	then
+		#run mutect for tumor only
+		gatk Mutect2 \
+                -R ${REF} \
+                -I ${tumor_bam} \
+		-L ${INTERVALS} \
+                --germline-resource ${GERMLINE_RESOURCE} \
+                --panel-of-normals  ${PON_VCFs}/somatic.panel.normals.vcf.gz \
+                -O ${SCRIPT_OUT}/${PATIENT}.tumor_only.unfiltered.somatic.vcf.gz
+
+		gatk GetPileupSummaries \
+                -I ${tumor_bam} \
+                -V ${GERMLINE_RESOURCE_BIALLELIC_COMMON_SNPS} \
+                -L ${INTERVALS} \
+                -O ${SCRIPT_OUT}/${PATIENT}_tumor_getpileupsummaries.table
+
+		gatk CalculateContamination \
+                -I ${SCRIPT_OUT}/${PATIENT}_tumor_getpileupsummaries.table \
+		--tumor-segmentation ${SCRIPT_OUT}/${PATIENT}_tumor_segmentation.tsv \
+                -O ${SCRIPT_OUT}/${PATIENT}_contamination.table
+
+		gatk FilterMutectCalls \
+		-R ${REF} \
+		-V ${SCRIPT_OUT}/${PATIENT}.tumor_only.unfiltered.somatic.vcf.gz \
+		--contamination-table ${SCRIPT_OUT}/${PATIENT}_contamination.table \
+		--tumor-segmentation ${SCRIPT_OUT}/${PATIENT}_tumor_segmentation.tsv \
+		-O ${SCRIPT_OUT}/${PATIENT}.tumor_only.filtered.somatic.vcf.gz && \
+		rm ${SCRIPT_OUT}/${PATIENT}.tumor_only.unfiltered.somatic.vcf.gz* && \
+
+		gatk Funcotator \
+		-R ${REF} \
+		-V ${SCRIPT_OUT}/${PATIENT}.tumor_only.filtered.somatic.vcf.gz \
+		-O ${SCRIPT_OUT}/${PATIENT}.funco.somatic.vcf \
+		--output-file-format VCF \
+		--data-sources-path ${ANNOTATIONS} \
+		--ref-version hg19 && \
+		rm ${SCRIPT_OUT}/${PATIENT}.tumor_only.filtered.somatic.vcf.gz*
+
+#elif [[ "${tumor_sam}" == "" ]]
+elif test -z "${tumor_sam}"
+	then
+		#don't run mutect for normal only, it tells us nothing about meso
+		echo "No tumor = germline analysis only."
+		echo "Exiting."
+		exit 0
+else
+		#run mutect in paired normal-tumor mode
+		gatk Mutect2 \
+		-R ${REF} \
+		-I ${normal_bam} \
+		-I ${tumor_bam} \
+		-L ${INTERVALS} \
+		-normal ${normal_sam} \
+		--germline-resource ${GERMLINE_RESOURCE} \
+		--panel-of-normals ${PON_VCFs}/somatic.panel.normals.vcf.gz \
+		-O ${SCRIPT_OUT}/${PATIENT}.unfiltered.somatic.vcf.gz
+
+		gatk GetPileupSummaries \
+		-I ${tumor_bam} \
+		-V ${GERMLINE_RESOURCE_BIALLELIC_COMMON_SNPS} \
+		-L ${INTERVALS} \
+		-O ${SCRIPT_OUT}/${PATIENT}_tumor_getpileupsummaries.table
+
+		gatk GetPileupSummaries \
+                -I ${normal_bam} \
+                -V ${GERMLINE_RESOURCE_BIALLELIC_COMMON_SNPS} \
+                -L ${INTERVALS} \
+                -O ${SCRIPT_OUT}/${PATIENT}_normal_getpileupsummaries.table 
+
+		gatk CalculateContamination \
+   		-I ${SCRIPT_OUT}/${PATIENT}_tumor_getpileupsummaries.table \
+		-matched ${SCRIPT_OUT}/${PATIENT}_normal_getpileupsummaries.table \
+		--tumor-segmentation ${SCRIPT_OUT}/${PATIENT}_tumor_segmentation.tsv \
+		-O ${SCRIPT_OUT}/${PATIENT}_contamination.table
+
+		gatk FilterMutectCalls \
+                -R ${REF} \
+                -V ${SCRIPT_OUT}/${PATIENT}.unfiltered.somatic.vcf.gz \
+                --contamination-table ${SCRIPT_OUT}/${PATIENT}_contamination.table \
+                --tumor-segmentation ${SCRIPT_OUT}/${PATIENT}_tumor_segmentation.tsv \
+                -O ${SCRIPT_OUT}/${PATIENT}.filtered.somatic.vcf.gz && \
+		rm ${SCRIPT_OUT}/${PATIENT}.unfiltered.somatic.vcf.gz*
+		
+		gatk Funcotator \
+                -R ${REF} \
+                -V ${SCRIPT_OUT}/${PATIENT}.filtered.somatic.vcf.gz \
+                -O ${SCRIPT_OUT}/${PATIENT}.funco.somatic.vcf \
+                --output-file-format VCF \
+                --data-sources-path ${ANNOTATIONS} \
+                --ref-version hg19 && \
+		rm ${SCRIPT_OUT}/${PATIENT}.filtered.somatic.vcf.gz*
+
+fi
+
+echo "SCRIPT_OUT: ${SCRIPT_OUT}/${PATIENT}"
+mkdir -p ${AIMS_OUT}/${PATIENT}
+
+bgzip ${SCRIPT_OUT}/${PATIENT}.funco.somatic.vcf 
+tabix -p vcf ${SCRIPT_OUT}/${PATIENT}.funco.somatic.vcf.gz
+
+bcftools annotate \
+--rename-chrs ${RENAME_CHRs} \
+-O z \
+${SCRIPT_OUT}/${PATIENT}.funco.somatic.vcf.gz \
+-o ${SCRIPT_OUT}/${PATIENT}.funco.b37names.somatic.vcf.gz && \
+rm ${SCRIPT_OUT}/${PATIENT}.funco.somatic.vcf*
+
+tabix -p vcf ${SCRIPT_OUT}/${PATIENT}.funco.b37names.somatic.vcf.gz
+
+bcftools annotate \
+-a ${DBSNP} \
+-c ID \
+-O z \
+${SCRIPT_OUT}/${PATIENT}.funco.b37names.somatic.vcf.gz \
+-o ${SCRIPT_OUT}/${PATIENT}.annotated.somatic.vcf.gz && \
+rm ${SCRIPT_OUT}/${PATIENT}.funco.b37names.somatic.vcf.gz*

@@ -1,0 +1,3 @@
+#usage bsub -q big -W 670:00 -n 1 -R 'rusage[mem=10000]' < CADDshrinker.lsf 
+
+zcat VCFheader.vcf.gz CADD_path/whole_genome_SNVs_inclAnno.tsv.gz | awk -F '\t' '{print $1,$2,$3,$4,$19}' > CADD_path/somatic.filtered_whole_genome_SNVs_inclAnno.tsv

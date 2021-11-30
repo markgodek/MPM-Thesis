@@ -1,0 +1,111 @@
+#!/bin/bash
+
+#BSUB -W 336:00                      #job run how long? [hours:minutes]
+#BSUB -q big                       #submit to queue
+#BSUB -M 32000                     #allocate RAM in MB
+#BSUB -R rusage[mem=32000]         #specify RAM in MB
+
+EXOME_DIR=$1
+REF=$2
+INTERVALS=$3
+SAMPLES=$4
+PROC_DIR=$5
+ONEK_INDELS=$6
+MILLS_INDELS=$7
+DBSNP=$8
+NORMAL_SAMPLES=$9
+PON_VCFs=${10}
+
+sample=`head -n ${LSB_JOBINDEX} ${SAMPLES} | tail -n 1`
+SCRIPT_OUT=${PROC_DIR}/${sample}
+
+mkdir -p ${SCRIPT_OUT}
+
+echo "LSB_JOBINDEX is: ${LSB_JOBINDEX}"
+echo ${EXOME_DIR}
+echo ${SAMPLES}
+echo "Sample is: ${sample}"
+
+fastqc --noextract -t 4 -f fastq ${EXOME_DIR}/${sample}_1_1.gne.fastq.gz -o ${SCRIPT_OUT}
+fastqc --noextract -t 4 -f fastq ${EXOME_DIR}/${sample}_1_2.gne.fastq.gz -o ${SCRIPT_OUT}
+
+java -jar /apps/lib/trimmomatic/0.36/trimmomatic.jar PE -threads 6 \
+${EXOME_DIR}/${sample}_1_1.gne.fastq.gz \
+${EXOME_DIR}/${sample}_1_2.gne.fastq.gz \
+-baseout ${SCRIPT_OUT}/${sample}.fq.gz \
+ILLUMINACLIP:/apps/lib/trimmomatic/0.36/adapters/TruSeq3-PE.fa:2:30:10:2:keepBothReads \
+LEADING:3 TRAILING:3 MINLEN:36
+
+#read group info in SAM file spec - http://samtools.github.io/hts-specs/SAMv1.pdf
+        # ID - unique read group identifier
+        # SM - sample name
+        # LB - Library
+        # PL - platform
+        # PU - Platform unit - flowcell-barcode.lane for Illumina unique ID
+
+ID=$(zcat ${SCRIPT_OUT}/${sample}_1P.fq.gz | head -n 1 | cut -d':' -f2)
+PU=$(zcat ${SCRIPT_OUT}/${sample}_1P.fq.gz | head -n 1 | cut -d':' -f3,4)
+READ_GROUP="@RG\tID:${ID}\tLB:lib1\tPL:illumina\tPU:${PU}\tSM:${sample}"
+
+echo "READ_GROUP is ${READ_GROUP}"
+
+bwa mem -v 2 -t 6 -R ${READ_GROUP} ${REF} \
+${SCRIPT_OUT}/${sample}_1P.fq.gz \
+${SCRIPT_OUT}/${sample}_2P.fq.gz | \
+samtools view - -@ 12 -h -b -o ${SCRIPT_OUT}/${sample}.aln-pe.bam && \
+rm ${SCRIPT_OUT}/${sample}_1P.fq.gz ${SCRIPT_OUT}/${sample}_1U.fq.gz ${SCRIPT_OUT}/${sample}_2P.fq.gz ${SCRIPT_OUT}/${sample}_2U.fq.gz
+
+gatk SortSam \
+-I ${SCRIPT_OUT}/${sample}.aln-pe.bam \
+-O ${SCRIPT_OUT}/${sample}.sorted.aln-pe.bam \
+-SO coordinate && \
+rm ${SCRIPT_OUT}/${sample}.aln-pe.bam
+
+#mark and remove duplicates
+
+gatk MarkDuplicates \
+-I ${SCRIPT_OUT}/${sample}.sorted.aln-pe.bam \
+-O ${SCRIPT_OUT}/${sample}.no-dup.aln-pe.bam \
+-M ${SCRIPT_OUT}/${sample}.marked_dup_metrics.txt && \
+rm ${SCRIPT_OUT}/${sample}.sorted.aln-pe.bam 
+
+gatk SortSam \
+-I ${SCRIPT_OUT}/${sample}.no-dup.aln-pe.bam \
+-O ${SCRIPT_OUT}/${sample}.no-dup.sorted.aln-pe.bam \
+-SO coordinate && \
+rm ${SCRIPT_OUT}/${sample}.no-dup.aln-pe.bam
+
+#create recalibration table
+
+gatk BaseRecalibrator \
+-I ${SCRIPT_OUT}/${sample}.no-dup.sorted.aln-pe.bam \
+-R ${REF} \
+--known-sites ${DBSNP} \
+--known-sites ${ONEK_INDELS} \
+--known-sites ${MILLS_INDELS} \
+-O ${SCRIPT_OUT}/${sample}_recal_data.table 
+
+#apply recalibration
+
+gatk ApplyBQSR \
+-R ${REF} \
+-bqsr ${SCRIPT_OUT}/${sample}_recal_data.table \
+-I ${SCRIPT_OUT}/${sample}.no-dup.sorted.aln-pe.bam \
+-O ${SCRIPT_OUT}/${sample}.post.bam && \
+rm ${SCRIPT_OUT}/${sample}.no-dup.sorted.aln-pe.bam
+
+fastqc --noextract -t 4 -f bam_mapped ${SCRIPT_OUT}/${sample}.post.bam -o ${SCRIPT_OUT}
+
+if grep -Fxq "${sample}" "${NORMAL_SAMPLES}" ;
+then 
+	echo "${sample} is a normal sample, running Mutect2 in tumor-only mode for PON generation."
+
+	gatk Mutect2 \
+	-R ${REF} \
+	-I ${PROC_DIR}/${sample}/${sample}.post.bam \
+	--native-pair-hmm-threads 4 \
+	--max-mnp-distance 0 \
+	-O ${PON_VCFs}/${sample}.normal.vcf.gz
+
+fi
+#if grep -q $sample $NORMAL_SAMPLES ; then echo "True" ; fi

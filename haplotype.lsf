@@ -1,0 +1,29 @@
+#!/bin/bash
+
+#BSUB -n 4                         #each job run on 1 core
+#BSUB -W 336:00                      #job run how long? [hours:minutes]
+#BSUB -q big                       #submit to queue
+#BSUB -M 16000                     #allocate RAM in MB
+#BSUB -R rusage[mem=16000]         #specify RAM in MB
+
+PROC_DIR=$1
+SAMPLES=$2
+SCRIPT_OUT=$3
+REF=$4
+
+SAMPLE_COUNT=$(($(wc -l < ${DIR}) - 1))
+
+echo DIR: ${PROC_DIR}
+echo sample count is ${SAMPLE_COUNT}
+
+sample=`head -n ${LSB_JOBINDEX} ${SAMPLES} | tail -n 1`
+
+normal_bam=${PROC_DIR}/${sample}/${sample}.post.bam
+echo normal_bam is ${normal_bam}
+
+#run HaplotypeCaller for normal only
+gatk HaplotypeCaller \
+-R ${REF} \
+-I ${normal_bam} \
+-O ${SCRIPT_OUT}/${sample}.normal.g.vcf.gz \
+-ERC GVCF
